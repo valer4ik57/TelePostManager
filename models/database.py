@@ -28,5 +28,14 @@ class Database:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(channel_id) REFERENCES channels(channel_id)
             );
+            
+             -- Добавляем таблицу для шаблонов
+             CREATE TABLE IF NOT EXISTS templates (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE,
+            content TEXT,
+            category TEXT,
+            media TEXT
+        );
         """)
         self.connection.commit()

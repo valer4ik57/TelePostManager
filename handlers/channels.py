@@ -50,3 +50,7 @@ async def handle_forwarded_channel(message: types.Message, bot: Bot):  # Исп�
         await message.answer(f"✅ Канал {channel.title} успешно добавлен!")
     except sqlite3.IntegrityError:
         await message.answer("⚠️ Этот канал уже был добавлен ранее")
+
+@router.message(F.text == "➕ Добавить канал")
+async def add_channel_button(message: types.Message, bot: Bot):
+    await add_channel(message, bot)  # Используем существующую функцию

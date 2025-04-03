@@ -2,11 +2,13 @@ from datetime import datetime
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+
+from handlers.common import get_main_keyboard
 from models.database import Database
 from config import DATABASE_NAME, BANNED_WORDS_FILE
 from services.scheduler import add_scheduled_job
 from post_states import PostCreation
-import sqlite3
+
 
 router = Router()
 db = Database(DATABASE_NAME)
@@ -27,19 +29,92 @@ async def get_channels_keyboard():
 
 @router.message(Command("new_post"))
 async def start_post(message: types.Message, state: FSMContext):
-    """Начало создания поста"""
     channels_count = db.cursor.execute("SELECT COUNT(*) FROM channels").fetchone()[0]
 
     if channels_count == 0:
-        return await message.answer("❌ Сначала добавьте канал через /add_channel")
+        await message.answer("❌ Сначала добавьте канал через «➕ Добавить канал»", reply_markup=get_main_keyboard())
+        return
 
+    # Проверка наличия шаблонов
+    templates = db.cursor.execute("SELECT name FROM templates").fetchall()
+
+    if templates:
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text=tpl[0], callback_data=f"template_{tpl[0]}")]
+            for tpl in templates
+        ])
+        keyboard.inline_keyboard.append(
+            [types.InlineKeyboardButton(text="✖️ Без шаблона", callback_data="no_template")])
+        await message.answer("📁 Выберите шаблон:", reply_markup=keyboard)
+        await state.set_state(PostCreation.SELECT_TEMPLATE)
+    else:
+        await message.answer("📌 Выберите канал:", reply_markup=await get_channels_keyboard())
+        await state.set_state(PostCreation.SELECT_CHANNEL)
+
+
+@router.callback_query(F.data.startswith("template_"), PostCreation.SELECT_TEMPLATE)
+async def apply_template(callback: types.CallbackQuery, state: FSMContext):
+    template_name = callback.data.split("_")[1]
+    template = db.cursor.execute(
+        "SELECT content FROM templates WHERE name = ?",
+        (template_name,)
+    ).fetchone()
+
+    if template:
+        await state.update_data(
+            template_content=template[0],  # Сохраняем шаблон
+            user_content=""  # Инициализируем поле для ввода пользователя
+        )
+        await callback.message.answer("📝 Введите текст новости:")
+        await state.set_state(PostCreation.FILL_TEMPLATE)
+    else:
+        await callback.message.answer("❌ Шаблон не найден!")
+    await callback.answer()
+
+
+@router.message(PostCreation.FILL_TEMPLATE)
+async def fill_template(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    template_content = data["template_content"]
+    user_text = message.text
+
+    # Получаем данные пользователя
+    user = message.from_user
+    author_name = user.full_name if user.full_name else "Неизвестный автор"
+
+    # Генерируем уникальную ссылку (пример)
+    unique_link = f"https://example.com/{datetime.now().timestamp()}"
+
+    # Замена всех переменных
+    formatted_content = (
+        template_content
+        .replace("{дата}", datetime.now().strftime("%d.%m.%Y"))
+        .replace("{время}", datetime.now().strftime("%H:%M"))
+        .replace("{текст_новости}", user_text)
+        .replace("{автора}", author_name)
+        .replace("{ссылка}", unique_link)
+    )
+
+    await state.update_data(content=formatted_content)
     await message.answer("📌 Выберите канал:", reply_markup=await get_channels_keyboard())
     await state.set_state(PostCreation.SELECT_CHANNEL)
 
 
+@router.callback_query(F.data == "no_template", PostCreation.SELECT_TEMPLATE)
+async def no_template(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("📌 Выберите канал:", reply_markup=await get_channels_keyboard())
+    await state.set_state(PostCreation.SELECT_CHANNEL)
+    await callback.answer()
+
+@router.callback_query(F.data == "no_template")
+async def no_template(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("📝 Введите текст поста:")
+    await state.set_state(PostCreation.CONTENT)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("channel_"), PostCreation.SELECT_CHANNEL)
 async def select_channel(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка выбора канала"""
     channel_id = int(callback.data.split("_")[1])
     channel = db.cursor.execute(
         "SELECT title FROM channels WHERE channel_id = ?",
@@ -49,11 +124,11 @@ async def select_channel(callback: types.CallbackQuery, state: FSMContext):
     if not channel:
         return await callback.answer("❌ Канал не найден!")
 
+    # Сохраняем channel_id и channel_title
     await state.update_data(channel_id=channel_id, channel_title=channel[0])
     await callback.message.edit_text(f"✅ Выбран канал: {channel[0]}")
-    await callback.message.answer("📝 Введите текст поста:")
-    await state.set_state(PostCreation.CONTENT)
-
+    await state.set_state(PostCreation.MEDIA)  # Переходим сразу к медиа
+    await callback.message.answer("📎 Прикрепите фото или нажмите /skip")
 
 @router.message(PostCreation.CONTENT)
 async def process_content(message: types.Message, state: FSMContext):
@@ -104,6 +179,11 @@ async def process_schedule(message: types.Message, state: FSMContext):
     """Обработка времени публикации"""
     time_str = message.text.strip().lower()
     data = await state.get_data()
+
+    if "channel_title" not in data:
+        await message.answer("❌ Ошибка: канал не выбран. Начните заново.")
+        await state.clear()
+        return
 
     try:
         publish_time = (

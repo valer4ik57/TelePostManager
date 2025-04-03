@@ -12,19 +12,15 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
-    # Первый ряд
     builder.button(text="📝 Создать пост")
     builder.button(text="📢 Мои каналы")
-
-    # Второй ряд
+    builder.button(text="➕ Добавить канал")
     builder.button(text="📚 Шаблоны")
     builder.button(text="📜 История")
-
-    # Третий ряд
     builder.button(text="🆘 Помощь")
+    builder.adjust(2, 2, 2, 1)
+    return builder.as_markup(resize_keyboard=True)
 
-    builder.adjust(2, 2, 1)  # 2 кнопки в первом ряду, 2 во втором, 1 в третьем
-    return builder.as_markup(resize_keyboard=True, input_field_placeholder="Выберите действие")
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
