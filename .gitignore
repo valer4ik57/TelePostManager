@@ -1,0 +1,153 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Обычно используется для создания .exe файлов, если будете делать
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff (если вдруг будете использовать)
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff (если вдруг будете использовать)
+instance/
+.webassets-cache
+
+# Scrapy stuff (если вдруг будете использовать)
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# PEP 582; __pypackages__ directory
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath files
+*.sage.py
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+*.iml
+
+# SQLite Database files
+*.db
+*.db-journal # SQLite >= 3.7.0
+*.sqlite
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# Banned words file (если не хотите его версионировать)
+# banned_words.txt # <-- Раскомментируйте, если хотите игнорировать
+
+# dotenv environment files
+.env* # Игнорирует .env, .env.example (если вы его тоже не хотите коммитить)
+# Если .env.example должен быть в репозитории, то закомментируйте строку выше
+# и добавьте только .env
+
+# Custom
+/media_files/ # Если у вас есть папка для временных или загружаемых медиа
+*.session # Файлы сессий aiogram, если используются (обычно нет для ботов)
