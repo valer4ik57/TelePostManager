@@ -1,19 +1,15 @@
-# handlers/history.py
 import sqlite3
 from datetime import datetime
 from aiogram import Router, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder  # Для возможной пагинации
-import logging # Добавьте импорт
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import logging
 
-
-
-# Импортируем из loader и utils
 from loader import get_db
-from bot_utils import get_main_keyboard  # Используем bot_utils
-from bot_utils import escape_html # <--- ДОБАВИТЬ ИМПОРТ
+from bot_utils import get_main_keyboard, escape_html
 
 router = Router()
+logger = logging.getLogger(__name__)  # Используем логгер из logging
 
 POSTS_PER_PAGE = 5  # Количество постов на одной странице истории
 
@@ -21,100 +17,105 @@ POSTS_PER_PAGE = 5  # Количество постов на одной стра
 @router.message(Command("history"))
 @router.message(F.text == "📜 История")
 async def show_history_command(message: types.Message):
-    # При вызове команды или нажатии кнопки показываем первую страницу
     await display_history_page(message, page=0)
 
 
 async def display_history_page(message_or_callback: types.Message | types.CallbackQuery, page: int):
     db = get_db()
+    current_user_id = message_or_callback.from_user.id
     offset = page * POSTS_PER_PAGE
 
     try:
-        # Считаем общее количество постов для пагинации
-        total_posts_query = db.fetchone("SELECT COUNT(*) FROM posts")
+        # Считаем общее количество постов для пагинации ДЛЯ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ
+        total_posts_query = db.fetchone(
+            "SELECT COUNT(*) FROM posts WHERE user_id = ?",
+            (current_user_id,)
+        )
         total_posts = total_posts_query[0] if total_posts_query else 0
 
-        # Запрос постов для текущей страницы
+        # Запрос постов для текущей страницы ДЛЯ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ
+        # Используем LEFT JOIN, чтобы получить посты, даже если канал был удален из списка пользователя
         posts_data = db.fetchall(
             f"""SELECT 
-                posts.id, 
-                channels.title, 
-                posts.content, 
-                posts.publish_time, 
-                posts.status,
-                posts.message_id,  -- ID сообщения в канале
-                posts.channel_id   -- Telegram ID канала
-            FROM posts
-            JOIN channels ON posts.channel_id = channels.channel_id -- Используем JOIN вместо LEFT JOIN, если пост без канала не имеет смысла
-            ORDER BY posts.publish_time DESC 
+                p.id, 
+                ch.title,        -- Название канала из таблицы channels (может быть NULL)
+                p.content, 
+                p.publish_time, 
+                p.status,
+                p.message_id,    -- ID сообщения в канале
+                p.channel_id     -- Telegram ID канала из таблицы posts
+            FROM posts p
+            LEFT JOIN channels ch ON p.channel_id = ch.channel_id AND p.user_id = ch.user_id 
+            WHERE p.user_id = ?
+            ORDER BY p.publish_time DESC 
             LIMIT ? OFFSET ?""",
-            (POSTS_PER_PAGE, offset)
+            (current_user_id, POSTS_PER_PAGE, offset)
         )
 
-        if not posts_data and page == 0:  # Если вообще нет постов
-            response_text = "📭 История публикаций пуста."
-            reply_markup = get_main_keyboard()
+        if not posts_data and page == 0:
+            response_text = "📭 Ваша история публикаций пуста."
+            reply_markup = get_main_keyboard()  # Для сообщения, а не для коллбэка
             if isinstance(message_or_callback, types.Message):
                 await message_or_callback.answer(response_text, reply_markup=reply_markup)
             elif isinstance(message_or_callback, types.CallbackQuery):
-                await message_or_callback.message.edit_text(response_text, reply_markup=reply_markup)
+                # Если это коллбэк и первая страница пуста, редактируем сообщение
+                await message_or_callback.message.edit_text(response_text, reply_markup=None)  # Убираем инлайн кнопки
                 await message_or_callback.answer()
             return
 
-        if not posts_data and page > 0:  # Если нет постов на этой странице (но были на предыдущих)
-            response_text = "📭 Больше нет записей в истории."
-            # Можно добавить кнопку "Назад" на предыдущую страницу
+        if not posts_data and page > 0:
+            response_text = "📭 Больше нет записей в вашей истории."
             builder = InlineKeyboardBuilder()
-            if page > 0:
+            if page > 0:  # Кнопка назад всегда должна быть, если page > 0
                 builder.button(text="⬅️ Назад", callback_data=f"history_page_{page - 1}")
-            builder.button(text="🏠 В меню", callback_data="history_to_main_menu")
+            builder.button(text="🏠 В меню", callback_data="history_to_main_menu")  # Общая кнопка в меню
             reply_markup = builder.as_markup()
 
-            if isinstance(message_or_callback, types.Message):  # Не должно случиться для page > 0 без коллбэка
-                await message_or_callback.answer(response_text, reply_markup=reply_markup)
-            elif isinstance(message_or_callback, types.CallbackQuery):
+            if isinstance(message_or_callback, types.CallbackQuery):
                 await message_or_callback.message.edit_text(response_text, reply_markup=reply_markup)
                 await message_or_callback.answer()
+            # Для message такой ситуации (page > 0 и нет постов) быть не должно, т.к. history_page вызывается только из коллбэка
             return
 
-        response_parts = [f"📜 <b>История публикаций (Страница {page + 1}):</b>\n"]
-        for post_id, ch_title, content, pub_time_iso, status, msg_id, ch_id_tg in posts_data:
-            # Экранирование
-            safe_ch_title = escape_html(ch_title)
-            safe_content_preview = escape_html(
-                content[:70] + "..." if content and len(content) > 70 else (content or ""))
+        response_parts = [f"📜 <b>Ваша история публикаций (Страница {page + 1}):</b>\n"]
+        for post_id, ch_title_from_db, content, pub_time_iso, status, msg_id, ch_id_tg_from_post in posts_data:
 
-            # ... (логика publish_time_str, status_emoji) ...
+            safe_content_preview = escape_html(
+                content[:70] + "..." if content and len(content) > 70 else (content or "[Без текста]")
+            )
+
             publish_time_dt = datetime.fromisoformat(pub_time_iso)
             publish_time_str = escape_html(publish_time_dt.strftime('%d.%m.%Y %H:%M'))
 
             status_emoji = {
-                "published": "✅",
-                "scheduled": "⏳",
-                "failed": "❌",
-                "cancelled": "🚫"  # Пример нового статуса
+                "published": "✅", "scheduled": "⏳", "failed": "❌", "cancelled": "🚫"
             }.get(status, "❓")
-
             safe_status_capitalized = escape_html(status.capitalize())
 
+            # Обработка названия канала
+            safe_ch_title_display: str
+            if ch_title_from_db:
+                safe_ch_title_display = escape_html(ch_title_from_db)
+            else:
+                # Если канал был удален пользователем из его списка `channels` (или никогда не был корректно добавлен под этим user_id)
+                escaped_ch_id_tg = escape_html(str(ch_id_tg_from_post))
+                safe_ch_title_display = f"<i>Канал (ID: <code>{escaped_ch_id_tg}</code>)</i>"
+
             post_link_html = ""
-            if status == "published" and msg_id and ch_id_tg:
-                channel_id_str_for_link = str(ch_id_tg).replace('-100', '')
-                # URL сам по себе не нужно экранировать для href, но текст ссылки - да
+            if status == "published" and msg_id and ch_id_tg_from_post:
+                channel_id_str_for_link = str(ch_id_tg_from_post).replace('-100', '')
                 link_url = f"https://t.me/c/{channel_id_str_for_link}/{msg_id}"
                 post_link_html = f' (<a href="{link_url}">Посмотреть</a>)'
 
             response_parts.append(
                 f"🆔 <b>Пост:</b> {post_id}\n"
-                f"📢 <b>Канал:</b> {safe_ch_title}\n"
+                f"📢 <b>Канал:</b> {safe_ch_title_display}\n"
                 f"⏰ <b>Время:</b> {publish_time_str}\n"
                 f"📝 <b>Текст:</b> {safe_content_preview}\n"
                 f"🔸 <b>Статус:</b> {status_emoji} {safe_status_capitalized}{post_link_html}\n"
             )
 
         response_text = "\n".join(response_parts)
-
-        # Кнопки пагинации
         builder = InlineKeyboardBuilder()
         row_buttons = []
         if page > 0:
@@ -128,73 +129,58 @@ async def display_history_page(message_or_callback: types.Message | types.Callba
             builder.row(*row_buttons)
         builder.row(types.InlineKeyboardButton(text="🏠 В меню", callback_data="history_to_main_menu"))
 
-
-        parse_mode_to_use = "HTML" # <--- HTML
+        parse_mode_to_use = "HTML"
 
         if isinstance(message_or_callback, types.Message):
             await message_or_callback.answer(response_text, reply_markup=builder.as_markup(),
                                              parse_mode=parse_mode_to_use, disable_web_page_preview=True)
         elif isinstance(message_or_callback, types.CallbackQuery):
-            # ... (проверка MessageNotModified) ...
-            await message_or_callback.message.edit_text(response_text, reply_markup=builder.as_markup(),
-                                                        parse_mode=parse_mode_to_use, disable_web_page_preview=True)
+            try:
+                await message_or_callback.message.edit_text(response_text, reply_markup=builder.as_markup(),
+                                                            parse_mode=parse_mode_to_use, disable_web_page_preview=True)
+            except types.TelegramBadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    logger.debug("Message not modified in history page display.")
+                else:
+                    raise  # Перевыбрасываем другие ошибки
             await message_or_callback.answer()
 
     except sqlite3.Error as e:
         error_msg = f"❌ Ошибка базы данных при загрузке истории: {str(e)}"
-        print(error_msg)  # Логирование
+        logger.error(error_msg, exc_info=True)
         if isinstance(message_or_callback, types.Message):
             await message_or_callback.answer(error_msg, reply_markup=get_main_keyboard())
         elif isinstance(message_or_callback, types.CallbackQuery):
-            await message_or_callback.message.edit_text(error_msg)  # reply_markup не меняем или ставим главное меню
+            await message_or_callback.message.edit_text(error_msg, reply_markup=None)
             await message_or_callback.answer("Ошибка БД", show_alert=True)
     except Exception as e:
         error_msg = f"❌ Неизвестная ошибка при загрузке истории: {str(e)}"
-        print(error_msg)  # Логирование
+        logger.error(error_msg, exc_info=True)
         if isinstance(message_or_callback, types.Message):
             await message_or_callback.answer(error_msg, reply_markup=get_main_keyboard())
         elif isinstance(message_or_callback, types.CallbackQuery):
-            await message_or_callback.message.edit_text(error_msg)
+            await message_or_callback.message.edit_text(error_msg, reply_markup=None)
             await message_or_callback.answer("Неизвестная ошибка", show_alert=True)
 
 
-logger_history = logging.getLogger(__name__) # Создайте логгер
 # Обработчик для кнопок пагинации истории
-@router.callback_query(F.data == "history_to_main_menu")
-async def history_back_to_main_menu(callback: types.CallbackQuery):
-    logger_history.info(f"!!! ATTENTION: history_to_main_menu CALLED by user {callback.from_user.id} !!!")
-    await callback.answer()  # Отвечаем на коллбэк, чтобы убрать "часики"
-
-    try:
-        # Сначала удаляем инлайн-клавиатуру у текущего сообщения
-        # или меняем текст, чтобы показать, что действие выполнено
-        await callback.message.edit_text("Возврат в главное меню...", reply_markup=None)
-        # Альтернатива: await callback.message.delete() # если хотите полностью удалить старое сообщение
-    except Exception as e:
-        logger_history.error(f"Error editing/deleting message in history_to_main_menu: {e}", exc_info=True)
-        # Если не удалось отредактировать/удалить, не страшно, просто отправим новое
-        pass # Ошибка здесь не должна прерывать отправку нового сообщения
-
-    # Отправляем новое сообщение с текстом и ReplyKeyboard
-    try:
-        await callback.message.answer("Вы вернулись в главное меню.", reply_markup=get_main_keyboard())
-    except Exception as e:
-        logger_history.error(f"Error sending main menu message in history_to_main_menu: {e}", exc_info=True)
+@router.callback_query(F.data.startswith("history_page_"))
+async def process_history_page_callback(callback: types.CallbackQuery):
+    page = int(callback.data.split("_")[2])
+    await display_history_page(callback, page=page)
 
 
 # Обработчик для кнопки "В меню" из истории
 @router.callback_query(F.data == "history_to_main_menu")
 async def history_back_to_main_menu(callback: types.CallbackQuery):
-    logger_history.info(f"!!! ATTENTION: history_to_main_menu CALLED by user {callback.from_user.id} !!!")
-    await callback.answer() # Отвечаем на коллбэк, чтобы убрать "часики"
+    logger.info(f"User {callback.from_user.id} clicked 'history_to_main_menu'")
+    await callback.answer()
 
     try:
-        # Сначала удаляем сообщение с инлайн-кнопками (или просто убираем его клавиатуру)
+        # Убираем инлайн-клавиатуру у текущего сообщения
         await callback.message.edit_reply_markup(reply_markup=None)
-        # или await callback.message.delete() # если хотите полностью удалить старое сообщение
     except Exception as e:
-        logger_history.error(f"Error modifying/deleting message in history_to_main_menu: {e}", exc_info=True)
-        # Если не удалось отредактировать/удалить, не страшно, просто отправим новое
+        logger.error(f"Error editing reply markup in history_to_main_menu: {e}", exc_info=True)
         pass
 
     # Отправляем новое сообщение с текстом и ReplyKeyboard

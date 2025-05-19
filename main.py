@@ -1,25 +1,30 @@
-# main.py
 import asyncio
-import logging  # Используем стандартный logging
-from loader import bot, dp, db_manager, scheduler  # Импортируем из loader
-from handlers import common, channels, posts, history, templates
+import logging
+from loader import bot, dp, db_manager, scheduler
+from handlers import (
+    common,
+    channels,
+    posts,
+    history,
+    templates,
+    admin_features,
+    scheduled_posts
+)
 
 
 async def main():
-    # Настройка логирования
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 
-    # Подключение к БД при старте
     await db_manager.startup()
 
-    # Подключение роутеров
     dp.include_router(common.router)
     dp.include_router(channels.router)
     dp.include_router(posts.router)
     dp.include_router(history.router)
     dp.include_router(templates.router)
+    dp.include_router(admin_features.router)
+    dp.include_router(scheduled_posts.router)
 
-    # Запуск планировщика
     scheduler.start()
 
     try:
@@ -29,9 +34,10 @@ async def main():
         logging.error(f"Ошибка при запуске бота: {e}", exc_info=True)
     finally:
         logging.info("Бот останавливается...")
-        await bot.session.close()
-        scheduler.shutdown(wait=False)  # wait=False чтобы не блокировать завершение, если есть задачи
-        await db_manager.shutdown()  # Закрытие соединения с БД
+        if bot.session and not bot.session.closed:
+             await bot.session.close()
+        scheduler.shutdown(wait=False)
+        await db_manager.shutdown()
         logging.info("Бот остановлен.")
 
 

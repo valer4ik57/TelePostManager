@@ -1,6 +1,5 @@
-# handlers/templates.py
 import sqlite3
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import logging
@@ -8,41 +7,37 @@ import logging
 from loader import get_db
 from bot_utils import get_main_keyboard, escape_html
 from post_states import TemplateStates
-from filters.admin import IsAdmin  # Импортируем фильтр IsAdmin
+from filters.admin import IsAdmin
+from config import SUPER_ADMIN_ID
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-COMMON_TEMPLATE_USER_ID = 0  # ID для общих/системных шаблонов
-
-AVAILABLE_TEMPLATE_VARIABLES = {
-    "{дата}": "Текущая дата (ДД.ММ.ГГГГ)",
-    "{время}": "Текущее время (ЧЧ:ММ)",
-    "{текст_новости}": "Основной текст, который вводит пользователь",
-    "{автор}": "Полное имя пользователя, создающего пост",
-}
-
+COMMON_TEMPLATE_USER_ID = 0
 
 async def get_templates_for_user(user_id: int) -> list:
     db = get_db()
     query = """
-        SELECT id, name, user_id FROM templates 
-        WHERE user_id = ? OR user_id = ? 
-        ORDER BY user_id ASC, name ASC 
-    """
+            SELECT id, name, user_id \
+            FROM templates
+            WHERE user_id = ? \
+               OR user_id = ?
+            ORDER BY user_id ASC, name ASC \
+            """
     return db.fetchall(query, (COMMON_TEMPLATE_USER_ID, user_id))
 
 
-async def check_if_user_is_admin(user_id: int) -> bool:
-    """Вспомогательная функция для проверки статуса администратора."""
+async def check_if_user_is_admin_for_display(user_id: int) -> bool:
+    if user_id == SUPER_ADMIN_ID:
+        return True
     db = get_db()
     admin_status = db.fetchone("SELECT is_admin FROM bot_users WHERE user_id = ?", (user_id,))
     return bool(admin_status and admin_status[0] == 1)
 
 
-async def templates_menu_keyboard_for_user(user_id: int):
+async def templates_menu_keyboard_for_user(user_id: int, message_id_to_edit: int | None = None):
     templates_list = await get_templates_for_user(user_id)
-    user_is_admin = await check_if_user_is_admin(user_id)  # Проверяем, админ ли пользователь
+    user_can_manage_common_templates = await check_if_user_is_admin_for_display(user_id)
 
     builder = InlineKeyboardBuilder()
     if templates_list:
@@ -57,26 +52,20 @@ async def templates_menu_keyboard_for_user(user_id: int):
                 types.InlineKeyboardButton(text=f"📄 {display_name}", callback_data=f"tpl_view_{tpl_id}")
             ]
 
-            # Пользователь может удалять только свои личные шаблоны
             if is_personal_template:
-                # action_buttons.append(types.InlineKeyboardButton(text="✏️", callback_data=f"tpl_edit_{tpl_id}")) # TODO: Редактирование
                 action_buttons.append(types.InlineKeyboardButton(text="❌", callback_data=f"tpl_delete_ask_{tpl_id}"))
-            # Админ может удалять и общие шаблоны (если это нужно, можно добавить условие)
-            # elif user_is_admin and tpl_user_id == COMMON_TEMPLATE_USER_ID:
-            #     action_buttons.append(types.InlineKeyboardButton(text="✏️ (Общий)", callback_data=f"tpl_edit_common_{tpl_id}"))
-            #     action_buttons.append(types.InlineKeyboardButton(text="❌ (Общий)", callback_data=f"tpl_delete_common_ask_{tpl_id}"))
 
             builder.row(*action_buttons)
 
-    # Кнопка для добавления ЛИЧНОГО шаблона (доступна всем)
     builder.row(types.InlineKeyboardButton(text="➕ Добавить свой шаблон", callback_data="tpl_add_personal"))
 
-    # Кнопка для добавления ОБЩЕГО шаблона (доступна ТОЛЬКО АДМИНУ)
-    if user_is_admin:
+    if user_can_manage_common_templates:
         builder.row(types.InlineKeyboardButton(text="👑 Добавить ОБЩИЙ шаблон", callback_data="tpl_add_common"))
-        # Можно добавить и другие админские кнопки, например, для управления общими шаблонами
+        manage_common_callback = f"tpl_manage_common"
+        builder.row(
+            types.InlineKeyboardButton(text="🗂️ Управление ОБЩИМИ шаблонами", callback_data=manage_common_callback))
 
-    builder.row(types.InlineKeyboardButton(text="📋 Показать доступные переменные", callback_data="tpl_show_vars"))
+    builder.row(types.InlineKeyboardButton(text="ℹ️ О переменных", callback_data="tpl_info_vars")) # Изменил callback_data для ясности
     builder.row(types.InlineKeyboardButton(text="⬅️ Назад в главное меню", callback_data="tpl_back_to_main"))
     return builder.as_markup()
 
@@ -88,10 +77,10 @@ async def templates_menu(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer("Состояние создания/редактирования шаблона сброшено.")
 
-    keyboard = await templates_menu_keyboard_for_user(message.from_user.id)
-    user_templates = await get_templates_for_user(message.from_user.id)  # Повторный вызов для текста сообщения
+    keyboard = await templates_menu_keyboard_for_user(message.from_user.id, message.message_id)
+    user_templates_count_query = await get_templates_for_user(message.from_user.id)
 
-    if not user_templates:  # Если нет ни общих, ни личных
+    if not user_templates_count_query:
         await message.answer("📭 Шаблоны не найдены (ни общие, ни ваши личные).", reply_markup=keyboard)
     else:
         await message.answer("📚 Шаблоны (общие и ваши личные):", reply_markup=keyboard)
@@ -102,59 +91,65 @@ async def tpl_back_to_main_menu_callback(callback: types.CallbackQuery):
     await callback.answer()
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
-    except:
+    except Exception:
         pass
     await callback.message.answer("Главное меню:", reply_markup=get_main_keyboard())
 
 
-@router.callback_query(F.data == "tpl_show_vars")
-async def show_template_variables_callback(callback: types.CallbackQuery):
-    # ... (код без изменений) ...
+@router.callback_query(F.data == "tpl_info_vars") # Изменен callback_data
+async def tpl_info_variables_callback(callback: types.CallbackQuery): # Изменено имя функции
     await callback.answer()
-    variables_text_parts = ["📌 <b>Доступные переменные для использования в шаблонах:</b>\n"]
-    for var, desc in AVAILABLE_TEMPLATE_VARIABLES.items():
-        variables_text_parts.append(f"<code>{escape_html(var)}</code> — {escape_html(desc)}")
-    variables_text_parts.append(
-        "\nВы можете использовать их в тексте шаблона, и они будут автоматически заменены при создании поста.")
-    await callback.message.answer("\n".join(variables_text_parts), parse_mode="HTML")
+    info_text = (
+        "✨ <b>Переменные в шаблонах</b> ✨\n\n"
+        "Вы можете создавать свои собственные переменные прямо в тексте шаблона, "
+        "чтобы затем заполнять их уникальным содержимым при создании поста.\n\n"
+        "<b>Как создать переменную:</b>\n"
+        "Используйте формат: <code>{[название_вашей_переменной]}</code>\n"
+        "<i>Например:</i> <code>{[Заголовок новости]}</code> или <code>{[Имя клиента]}</code>\n\n"
+        "▫️ Название переменной может состоять из букв, цифр, пробелов (внутри названия).\n"
+        "▫️ <b>Важно:</b> не используйте символы <code>{</code>, <code>}</code>, <code>[</code>, <code>]</code> внутри самого <u>названия</u> переменной.\n"
+        "▫️ При создании поста бот автоматически найдет все такие переменные в выбранном шаблоне "
+        "и последовательно запросит у вас значения для каждой из них.\n\n"
+        "<b>Пример шаблона:</b>\n"
+        "<code>Привет, {[Имя друга]}! Поздравляю с {[Событие]}!</code>\n\n"
+        "При использовании этого шаблона бот спросит:\n"
+        "1. Введите значение для 'Имя друга':\n"
+        "2. Введите значение для 'Событие':\n\n"
+        "Это позволяет создавать очень гибкие и персонализированные шаблоны!"
+    )
+    await callback.message.answer(info_text, parse_mode="HTML")
 
 
-# Начало добавления ЛИЧНОГО шаблона (для обычных пользователей)
 @router.callback_query(F.data == "tpl_add_personal")
 async def add_personal_template_start(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     await callback.message.edit_text(
         "📝 Введите название для вашего нового личного шаблона (например, 'Утренняя новость'):")
     await state.set_state(TemplateStates.AWAITING_NAME)
-    await state.update_data(is_creating_common_template=False)  # Явно указываем, что это НЕ общий
+    await state.update_data(is_creating_common_template=False, original_message_id=callback.message.message_id)
 
 
-# Начало добавления ОБЩЕГО шаблона (ТОЛЬКО ДЛЯ АДМИНА)
-@router.callback_query(F.data == "tpl_add_common", IsAdmin())  # Защищаем фильтром IsAdmin
+@router.callback_query(F.data == "tpl_add_common", IsAdmin())
 async def add_common_template_start_callback(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    await callback.message.edit_text("👑 Режим администратора: Добавление общего шаблона.\n"
-                                     "Введите название для нового ОБЩЕГО шаблона:")
+    await callback.message.edit_text(
+        "👑 Режим администратора: Добавление общего шаблона.\n"
+        "Введите название для нового ОБЩЕГО шаблона:")
     await state.set_state(TemplateStates.AWAITING_NAME)
-    await state.update_data(is_creating_common_template=True)  # Устанавливаем флаг
+    await state.update_data(is_creating_common_template=True, original_message_id=callback.message.message_id)
 
 
-# Если не админ пытается нажать кнопку tpl_add_common (фильтр IsAdmin не пропустит, но на всякий случай)
 @router.callback_query(F.data == "tpl_add_common")
 async def add_common_template_not_admin(callback: types.CallbackQuery):
-    await callback.answer("У вас нет прав для выполнения этого действия.", show_alert=True)
+    await callback.answer("⛔ У вас нет прав для выполнения этого действия.", show_alert=True)
 
 
-# Этапы AWAITING_NAME и AWAITING_CONTENT теперь должны учитывать флаг is_creating_common_template
-@router.message(TemplateStates.AWAITING_NAME, F.text)  # Убрал F.text, т.к. message.text и так есть
+@router.message(TemplateStates.AWAITING_NAME, F.text)
 async def process_template_name(message: types.Message, state: FSMContext):
     db = get_db()
     template_name = message.text.strip()
-
     data = await state.get_data()
     is_common_being_created = data.get("is_creating_common_template", False)
-
-    # Определяем, для какого user_id проверять уникальность и сохранять
     target_user_id_for_db = COMMON_TEMPLATE_USER_ID if is_common_being_created else message.from_user.id
     template_type_description = "общего" if is_common_being_created else "вашего личного"
 
@@ -171,22 +166,43 @@ async def process_template_name(message: types.Message, state: FSMContext):
             f"❌ Уже существует {template_type_description} шаблон с названием «{escape_html(template_name)}». Придумайте другое название.")
         return
 
-    await state.update_data(template_name=template_name)  # is_creating_common_template уже в state
+    await state.update_data(template_name=template_name)
+    try:
+        await message.delete()
+    except Exception:
+        logger.warning(f"Could not delete message with template name request from user {message.from_user.id}")
+
     await message.answer(
         f"📄 Теперь отправьте текст для {template_type_description} шаблона «{escape_html(template_name)}».\n"
-        "Вы можете использовать переменные. Можно прикрепить ОДНО фото/видео."
+        "Используйте переменные вида <code>{[название]}</code>, чтобы потом их заполнить. " # Обновлен текст
+        "Можно также прикрепить ОДНО фото/видео."
+        "\n\n<i>Для отмены введите /cancel или 'отмена'.</i>",
+        parse_mode="HTML"
     )
     await state.set_state(TemplateStates.AWAITING_CONTENT)
 
+# ... (остальная часть handlers/templates.py остается такой же, как в твоей версии)
+# process_template_content, view_template_callback, delete_... и manage_common_templates_...
+# не требуют изменений для этой конкретной задачи унификации переменных.
 
+# ... (код для view_template_callback и далее остается как в твоей версии) ...
 @router.message(TemplateStates.AWAITING_CONTENT, F.photo | F.video | F.text)
 async def process_template_content(message: types.Message, state: FSMContext):
     data = await state.get_data()
     template_name = data.get("template_name")
-    if not template_name:  # На случай если состояние "потерялось"
+    original_message_id = data.get("original_message_id")
+
+    if not template_name:
         logger.error(f"Template name not found in state for user {message.from_user.id} in AWAITING_CONTENT")
-        await message.answer("Произошла ошибка, название шаблона не найдено. Пожалуйста, начните заново.",
+        await message.answer("Произошла ошибка (имя шаблона не найдено). Пожалуйста, начните заново.",
                              reply_markup=get_main_keyboard())
+        if original_message_id:
+            try:
+                keyboard_fallback = await templates_menu_keyboard_for_user(message.from_user.id, original_message_id)
+                await message.bot.edit_message_text("Ошибка. Возврат в меню шаблонов.", chat_id=message.chat.id,
+                                                    message_id=original_message_id, reply_markup=keyboard_fallback)
+            except Exception:
+                pass
         await state.clear()
         return
 
@@ -210,6 +226,10 @@ async def process_template_content(message: types.Message, state: FSMContext):
         return
 
     final_content_for_db = content_from_user if content_from_user is not None else ""
+    try:
+        await message.delete()
+    except Exception:
+        logger.warning(f"Could not delete message with template content from user {message.from_user.id}")
 
     db = get_db()
     try:
@@ -220,13 +240,26 @@ async def process_template_content(message: types.Message, state: FSMContext):
         )
         logger.info(
             f"{template_type_description} template '{template_name}' (owner: {template_owner_user_id}) saved by user {message.from_user.id}")
-        await message.answer(f"✅ {template_type_description} шаблон «{escape_html(template_name)}» успешно сохранен!",
-                             reply_markup=get_main_keyboard())
+
+        await message.answer(f"✅ {template_type_description} шаблон «{escape_html(template_name)}» успешно сохранен!")
+
+        if original_message_id:
+            if is_common_being_created:
+                await manage_common_templates_menu_logic(message.from_user.id, message.bot, original_message_id,
+                                                         message.chat.id)
+            else:
+                keyboard = await templates_menu_keyboard_for_user(message.from_user.id, original_message_id) # Передаем ID для ред.
+                await message.bot.edit_message_text("📚 Шаблоны (общие и ваши личные):",
+                                                    chat_id=message.chat.id,
+                                                    message_id=original_message_id,
+                                                    reply_markup=keyboard)
+        else:
+            keyboard_fallback = await templates_menu_keyboard_for_user(message.from_user.id)
+            await message.answer("📚 Шаблоны (общие и ваши личные):", reply_markup=keyboard_fallback)
+
     except sqlite3.IntegrityError:
-        logger.error(
-            f"IntegrityError on template save (owner {template_owner_user_id}, name {template_name}). Should be caught earlier.")
-        await message.answer(
-            f"❌ Шаблон с названием «{escape_html(template_name)}» уже существует для этого типа (ошибка).")
+        logger.error(f"IntegrityError on template save (owner {template_owner_user_id}, name {template_name}).")
+        await message.answer(f"❌ Шаблон с названием «{escape_html(template_name)}» уже существует для этого типа.")
     except sqlite3.Error as e:
         logger.error(f"DB error saving template (owner {template_owner_user_id}): {e}", exc_info=True)
         await message.answer(f"❌ Ошибка базы данных при сохранении шаблона.")
@@ -234,10 +267,8 @@ async def process_template_content(message: types.Message, state: FSMContext):
         await state.clear()
 
 
-# Просмотр шаблона (остается как было, но учитывает COMMON_TEMPLATE_USER_ID)
 @router.callback_query(F.data.startswith("tpl_view_"))
 async def view_template_callback(callback: types.CallbackQuery):
-    # ... (код без изменений, он уже должен корректно обрабатывать общие и личные) ...
     await callback.answer()
     tpl_id_to_view = int(callback.data.split("_")[2])
     current_user_id = callback.from_user.id
@@ -250,8 +281,8 @@ async def view_template_callback(callback: types.CallbackQuery):
     if not template_data:
         logger.warning(
             f"User {current_user_id} tried to view non-existent or non-accessible template ID {tpl_id_to_view}")
-        await callback.message.edit_text("❌ Шаблон не найден или недоступен.",
-                                         reply_markup=await templates_menu_keyboard_for_user(current_user_id))
+        keyboard = await templates_menu_keyboard_for_user(current_user_id, callback.message.message_id)
+        await callback.message.edit_text("❌ Шаблон не найден или недоступен.", reply_markup=keyboard)
         return
 
     name, content, media_file_id, media_type_from_db, tpl_owner_id = template_data
@@ -262,12 +293,8 @@ async def view_template_callback(callback: types.CallbackQuery):
         text_to_send_parts.append(f"\n{escape_html(content)}")
     else:
         text_to_send_parts.append("\n[Без текстового содержимого]")
-    final_caption_for_media = "\n".join(text_to_send_parts)
 
-    try:  # Обернем edit_text в try-except на случай если сообщение уже удалено
-        await callback.message.edit_text(f"Просмотр шаблона «{escape_html(name)}»...", reply_markup=None)
-    except Exception as e_edit:
-        logger.info(f"Could not edit message before viewing template: {e_edit}")
+    final_caption_for_media = "\n".join(text_to_send_parts)
 
     if media_file_id:
         media_info_text = "🖼️ <i>К шаблону прикреплено медиа.</i>"
@@ -281,10 +308,9 @@ async def view_template_callback(callback: types.CallbackQuery):
                                                     caption=f"{final_caption_for_media}\n{media_info_text}",
                                                     parse_mode="HTML")
             else:
-                logger.warning(
-                    f"Unknown media_type '{media_type_from_db}' for template ID {tpl_id_to_view} with media_id {media_file_id}")
+                logger.warning(f"Unknown media_type '{media_type_from_db}' for template ID {tpl_id_to_view}")
                 await callback.message.answer(
-                    f"{final_caption_for_media}\n{media_info_text}\n(Не удалось точно определить тип медиа ID: {escape_html(media_file_id)})",
+                    f"{final_caption_for_media}\n{media_info_text}\n(Неизвестный тип медиа ID: {escape_html(str(media_file_id))})",
                     parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error displaying media for template ID {tpl_id_to_view}: {e}", exc_info=True)
@@ -294,66 +320,61 @@ async def view_template_callback(callback: types.CallbackQuery):
     else:
         await callback.message.answer(final_caption_for_media, parse_mode="HTML")
 
-    await callback.message.answer("📚 Управление шаблонами:",
-                                  reply_markup=await templates_menu_keyboard_for_user(current_user_id))
 
-
-# Удаление ЛИЧНОГО шаблона (остается как было)
 @router.callback_query(F.data.startswith("tpl_delete_ask_"))
-async def delete_template_ask_callback(callback: types.CallbackQuery):
-    # ... (код без изменений, он уже проверяет, что user_id совпадает) ...
+async def delete_personal_template_ask_callback(callback: types.CallbackQuery):
     await callback.answer()
     tpl_id_to_delete = int(callback.data.split("_")[3])
     current_user_id = callback.from_user.id
     db = get_db()
 
     template_data = db.fetchone(
-        "SELECT name FROM templates WHERE id = ? AND user_id = ?",
-        (tpl_id_to_delete, current_user_id)
+        "SELECT name FROM templates WHERE id = ? AND user_id = ? AND user_id != ?",
+        (tpl_id_to_delete, current_user_id, COMMON_TEMPLATE_USER_ID)
     )
 
     if not template_data:
         logger.warning(
-            f"User {current_user_id} tried to delete non-existent or not owned template ID {tpl_id_to_delete}")
-        await callback.message.edit_text("❌ Шаблон не найден или это не ваш личный шаблон.",
-                                         reply_markup=await templates_menu_keyboard_for_user(current_user_id))
+            f"User {current_user_id} tried to delete non-existent, not owned, or common template ID {tpl_id_to_delete} via personal delete.")
+        keyboard = await templates_menu_keyboard_for_user(current_user_id, callback.message.message_id)
+        await callback.message.edit_text("❌ Шаблон не найден, это не ваш личный шаблон или он уже удален.",
+                                         reply_markup=keyboard)
         return
 
     template_name = template_data[0]
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"tpl_delete_do_{tpl_id_to_delete}"),
-        types.InlineKeyboardButton(text="❌ Нет, отмена", callback_data="tpl_delete_cancel")
+        types.InlineKeyboardButton(text="❌ Нет, отмена", callback_data="tpl_delete_personal_cancel")
     )
     await callback.message.edit_text(
         f"❓ Вы уверены, что хотите удалить ваш личный шаблон «{escape_html(template_name)}»?",
         reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
-@router.callback_query(F.data == "tpl_delete_cancel")
-async def delete_template_cancel_callback(callback: types.CallbackQuery):
-    # ... (код без изменений) ...
+@router.callback_query(F.data == "tpl_delete_personal_cancel")
+async def delete_personal_template_cancel_callback(callback: types.CallbackQuery):
     await callback.answer("Удаление отменено.")
-    await callback.message.edit_text("📚 Управление шаблонами:",
-                                     reply_markup=await templates_menu_keyboard_for_user(callback.from_user.id))
+    keyboard = await templates_menu_keyboard_for_user(callback.from_user.id, callback.message.message_id)
+    await callback.message.edit_text("📚 Управление шаблонами:", reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("tpl_delete_do_"))
-async def delete_template_confirm_callback(callback: types.CallbackQuery):
-    # ... (код без изменений) ...
+async def delete_personal_template_confirm_callback(callback: types.CallbackQuery):
     await callback.answer()
     tpl_id_to_delete = int(callback.data.split("_")[3])
     current_user_id = callback.from_user.id
     db = get_db()
 
     template_data = db.fetchone(
-        "SELECT name FROM templates WHERE id = ? AND user_id = ?",
-        (tpl_id_to_delete, current_user_id)
+        "SELECT name FROM templates WHERE id = ? AND user_id = ? AND user_id != ?",
+        (tpl_id_to_delete, current_user_id, COMMON_TEMPLATE_USER_ID)
     )
 
     if not template_data:
-        await callback.message.edit_text("Шаблон уже удален или не найден.",
-                                         reply_markup=await templates_menu_keyboard_for_user(current_user_id))
+        keyboard = await templates_menu_keyboard_for_user(current_user_id, callback.message.message_id)
+        await callback.message.edit_text("Шаблон уже удален, не найден или это не ваш личный шаблон.",
+                                         reply_markup=keyboard)
         return
 
     template_name = template_data[0]
@@ -364,20 +385,162 @@ async def delete_template_confirm_callback(callback: types.CallbackQuery):
             commit=True
         )
         if db.cursor.rowcount > 0:
-            logger.info(f"User {current_user_id} deleted template '{template_name}' (DB ID {tpl_id_to_delete})")
-            await callback.answer(f"🗑 Шаблон «{escape_html(template_name)}» удален.", show_alert=True)
+            logger.info(
+                f"User {current_user_id} deleted personal template '{template_name}' (DB ID {tpl_id_to_delete})")
+            await callback.answer(f"🗑 Личный шаблон «{escape_html(template_name)}» удален.", show_alert=True)
         else:
             logger.warning(
-                f"Template (DB ID {tpl_id_to_delete}) not found for user {current_user_id} at delete confirm.")
-            await callback.answer("Не удалось удалить шаблон.", show_alert=True)
+                f"Personal template (DB ID {tpl_id_to_delete}) not found for user {current_user_id} at delete confirm.")
+            await callback.answer("Не удалось удалить личный шаблон.", show_alert=True)
 
-        await callback.message.edit_text("📚 Управление шаблонами:",
-                                         reply_markup=await templates_menu_keyboard_for_user(current_user_id))
+        keyboard = await templates_menu_keyboard_for_user(current_user_id, callback.message.message_id)
+        await callback.message.edit_text("📚 Управление шаблонами:", reply_markup=keyboard)
     except sqlite3.Error as e:
-        logger.error(f"DB error deleting template (DB ID {tpl_id_to_delete}) for user {current_user_id}: {e}",
+        logger.error(f"DB error deleting personal template (DB ID {tpl_id_to_delete}) for user {current_user_id}: {e}",
                      exc_info=True)
-        await callback.message.edit_text(f"❌ Ошибка при удалении шаблона.",
-                                         reply_markup=await templates_menu_keyboard_for_user(current_user_id))
+        keyboard = await templates_menu_keyboard_for_user(current_user_id, callback.message.message_id)
+        await callback.message.edit_text(f"❌ Ошибка при удалении личного шаблона.",
+                                         reply_markup=keyboard)
 
-# TODO: Админские функции для управления ОБЩИМИ шаблонами (удаление, редактирование)
-# Например, tpl_delete_common_ask_ID, tpl_edit_common_ID, защищенные IsAdmin()
+
+# --- Управление ОБЩИМИ шаблонами (для админа) ---
+
+async def manage_common_templates_menu_logic(user_id: int, bot_instance: Bot, message_id_to_edit: int,
+                                             chat_id: int):
+    db = get_db()
+    common_templates = db.fetchall(
+        "SELECT id, name FROM templates WHERE user_id = ? ORDER BY name ASC",
+        (COMMON_TEMPLATE_USER_ID,)
+    )
+
+    builder = InlineKeyboardBuilder()
+    if common_templates:
+        for tpl_id, tpl_name in common_templates:
+            builder.row(
+                types.InlineKeyboardButton(text=f"📄 {escape_html(tpl_name)}", callback_data=f"tpl_view_{tpl_id}"),
+                types.InlineKeyboardButton(text="❌ Удал.",
+                                           callback_data=f"tpl_delete_common_ask_{tpl_id}:{message_id_to_edit}")
+            )
+
+    builder.row(types.InlineKeyboardButton(text="➕ Добавить ОБЩИЙ шаблон", callback_data=f"tpl_add_common"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ Назад в основное меню шаблонов",
+                                           callback_data=f"tpl_back_to_main_tpl_menu:{message_id_to_edit}"))
+
+    try:
+        await bot_instance.edit_message_text(
+            text="👑 Управление ОБЩИМИ шаблонами:" + ("\n\n(Общие шаблоны не найдены)" if not common_templates else ""),
+            chat_id=chat_id,
+            message_id=message_id_to_edit,
+            reply_markup=builder.as_markup()
+        )
+    except Exception as e:
+        logger.error(f"Error editing common templates menu for user {user_id}, msg_id {message_id_to_edit}: {e}",
+                     exc_info=True)
+
+
+@router.callback_query(F.data.startswith("tpl_manage_common"), IsAdmin())
+async def manage_common_templates_menu_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    await manage_common_templates_menu_logic(callback.from_user.id, callback.bot, callback.message.message_id,
+                                             callback.message.chat.id)
+
+
+@router.callback_query(F.data.startswith("tpl_back_to_main_tpl_menu:"), IsAdmin())
+async def back_to_main_templates_menu_from_common_mgm(callback: types.CallbackQuery):
+    await callback.answer()
+    message_id_to_edit = int(callback.data.split(":")[1])
+    # При возврате в основное меню передаем ID сообщения для его редактирования
+    keyboard = await templates_menu_keyboard_for_user(callback.from_user.id, message_id_to_edit)
+    try:
+        await callback.message.edit_text("📚 Шаблоны (общие и ваши личные):", reply_markup=keyboard)
+    except Exception as e:
+        logger.warning(f"Could not edit message {message_id_to_edit} back to main templates menu: {e}")
+        new_keyboard = await templates_menu_keyboard_for_user(callback.from_user.id)
+        await callback.message.answer("📚 Шаблоны (общие и ваши личные):", reply_markup=new_keyboard)
+
+
+@router.callback_query(F.data.startswith("tpl_delete_common_ask_"), IsAdmin())
+async def delete_common_template_ask_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    tpl_id_to_delete = int(parts[0].split("_")[4])
+    original_message_id_for_menu = int(parts[1])
+    db = get_db()
+
+    template_data = db.fetchone(
+        "SELECT name FROM templates WHERE id = ? AND user_id = ?",
+        (tpl_id_to_delete, COMMON_TEMPLATE_USER_ID)
+    )
+
+    if not template_data:
+        logger.warning(
+            f"Admin {callback.from_user.id} tried to delete non-existent common template ID {tpl_id_to_delete}")
+        await callback.answer("Общий шаблон не найден или уже удален.", show_alert=True)
+        await manage_common_templates_menu_logic(callback.from_user.id, callback.bot, original_message_id_for_menu,
+                                                 callback.message.chat.id)
+        return
+
+    template_name = template_data[0]
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="✅ Да, удалить общий",
+                                   callback_data=f"tpl_del_com_do_{tpl_id_to_delete}:{original_message_id_for_menu}"),
+        types.InlineKeyboardButton(text="❌ Нет, отмена",
+                                   callback_data=f"tpl_del_com_cancel:{original_message_id_for_menu}")
+    )
+    await callback.message.edit_text(
+        f"👑 Вы уверены, что хотите удалить ОБЩИЙ шаблон «{escape_html(template_name)}»?",
+        reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("tpl_del_com_cancel:"), IsAdmin())
+async def delete_common_template_cancel_callback(callback: types.CallbackQuery):
+    await callback.answer("Удаление общего шаблона отменено.")
+    original_message_id_for_menu = int(callback.data.split(":")[1])
+    await manage_common_templates_menu_logic(callback.from_user.id, callback.bot, original_message_id_for_menu,
+                                             callback.message.chat.id)
+
+
+@router.callback_query(F.data.startswith("tpl_del_com_do_"), IsAdmin())
+async def delete_common_template_confirm_callback(callback: types.CallbackQuery):
+    await callback.answer()
+    parts = callback.data.split(":")
+    tpl_id_to_delete = int(parts[0].split("_")[4])
+    original_message_id_for_menu = int(parts[1])
+    db = get_db()
+
+    template_data = db.fetchone(
+        "SELECT name FROM templates WHERE id = ? AND user_id = ?",
+        (tpl_id_to_delete, COMMON_TEMPLATE_USER_ID)
+    )
+
+    if not template_data:
+        await callback.answer("Общий шаблон уже удален или не найден.", show_alert=True)
+        await manage_common_templates_menu_logic(callback.from_user.id, callback.bot, original_message_id_for_menu,
+                                                 callback.message.chat.id)
+        return
+
+    template_name = template_data[0]
+    try:
+        db.execute(
+            "DELETE FROM templates WHERE id = ? AND user_id = ?",
+            (tpl_id_to_delete, COMMON_TEMPLATE_USER_ID),
+            commit=True
+        )
+        if db.cursor.rowcount > 0:
+            logger.info(
+                f"Admin {callback.from_user.id} deleted COMMON template '{template_name}' (DB ID {tpl_id_to_delete})")
+            await callback.answer(f"🗑 Общий шаблон «{escape_html(template_name)}» удален.", show_alert=True)
+        else:
+            logger.warning(
+                f"COMMON template (DB ID {tpl_id_to_delete}) not found at delete confirm by admin {callback.from_user.id}.")
+            await callback.answer("Не удалось удалить общий шаблон.", show_alert=True)
+
+    except sqlite3.Error as e:
+        logger.error(
+            f"DB error deleting COMMON template (DB ID {tpl_id_to_delete}) by admin {callback.from_user.id}: {e}",
+            exc_info=True)
+        await callback.answer(f"❌ Ошибка при удалении общего шаблона.", show_alert=True)
+    finally:
+        await manage_common_templates_menu_logic(callback.from_user.id, callback.bot, original_message_id_for_menu,
+                                                 callback.message.chat.id)
